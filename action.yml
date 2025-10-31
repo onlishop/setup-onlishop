@@ -12,7 +12,7 @@ inputs:
   onlishop-version:
     description: "Onlishop Version to use"
     required: true
-    default: "v6.6.10.3"
+    default: "trunk"
   onlishop-repository:
     description: The onlishop repository to checkout
     required: true
