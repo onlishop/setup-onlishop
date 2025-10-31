@@ -1,0 +1,326 @@
+name: "Setup Onlishop"
+description: "Install Onlishop with specific versions in your CI"
+author: "onlishop AG"
+branding:
+  color: "blue"
+  icon: "download"
+inputs:
+  env:
+    description: "Environment for Onlishop"
+    required: true
+    default: "test"
+  onlishop-version:
+    description: "Onlishop Version to use"
+    required: true
+    default: "v6.6.10.3"
+  onlishop-repository:
+    description: The onlishop repository to checkout
+    required: true
+    default: onlishop/onlishop
+  onlishop-github-token:
+    description: Token used for checking out the onlishop repository
+    required: true
+    default: ${{ github.token }}
+  php-version:
+    description: "PHP Version to use"
+    required: true
+    default: "8.3"
+  php-extensions:
+    description: "PHP extensions to install"
+    required: true
+    default: "gd, xml, dom, curl, pdo, mysqli, mbstring, pdo_mysql, bcmath, pcov, zip"
+  php-fake-version:
+    description: "Fake the version for composer"
+    required: false
+    default: ""
+  composer-root-version:
+    description: "The COMPOSER_ROOT_VERSION that should be set"
+    required: false
+    default: ".auto"
+  install:
+    description: "Install Onlishop"
+    required: true
+    default: "false"
+  install-locale:
+    description: "Locale to install"
+    required: true
+    default: "en-GB"
+  install-currency:
+    description: "Currency to install"
+    required: true
+    default: "EUR"
+  keep-composer-tools:
+    description: "Keep Onlishop Composer tools (PHPStan, ECS, BC-Checker)"
+    required: true
+    default: "false"
+  mysql-version:
+    description: "MySQL Version to use"
+    required: true
+    default: "builtin"
+  node-version:
+    description: nodejs version to use
+    required: false
+    default: "20.x"
+  npm-version:
+    description: npm version to use
+    required: false
+    default: ""
+  install-admin:
+    description: Whether to install administration npm dependencies and prepare jest
+    required: false
+    default: ""
+  install-storefront:
+    description: Whether to install storefront npm dependencies
+    required: false
+    default: ""
+  skip-js-build:
+    description: Whether to skip the js build step. By default this is controlled by install-storefront and install-admin
+    required: false
+    default: "false"
+  path:
+    description: Relative path under $GITHUB_WORKSPACE to place the onlishop repository
+    required: true
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - uses: runs-on/action@v1
+    - name: Clone Onlishop
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.onlishop-repository || 'onlishop/onlishop' }}
+        ref: ${{ inputs.onlishop-version }}
+        path: ${{ inputs.path }}
+        token: ${{ inputs.onlishop-github-token }}
+    - name: Fake php version for composer
+      if: ${{ inputs.php-fake-version && inputs.php-fake-version != '' }}
+      working-directory: ${{ inputs.path }}
+      shell: bash
+      run: |
+        composer config platform.php "${{ inputs.php-fake-version }}"  
+
+    - name: Set COMPOSER_ROOT_VERSION
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        if [[ "${{ inputs.composer-root-version }}" == ".auto" ]]; then
+          if version=$(git describe --exact-match --tags 2>/dev/null); then
+              echo "COMPOSER_ROOT_VERSION=$version" >> "$GITHUB_ENV"
+          else
+              echo "COMPOSER_ROOT_VERSION=$(jq -r '.extra | .["branch-alias"] | .["dev-trunk"]' composer.json)" >> "$GITHUB_ENV"
+          fi
+        else
+          echo "COMPOSER_ROOT_VERSION=${{ inputs.composer-root-version }}" >> "$GITHUB_ENV"
+        fi
+
+    - name: Remove vendor-bin
+      if: inputs.keep-composer-tools == 'false'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: rm -rf vendor-bin
+
+    - name: Setup PHP
+      uses: shivammathur/setup-php@cf4cade2721270509d5b1c766ab3549210a39a2a # v2.33.0
+      env:
+        RUNNER: github
+        ImageOS: ubuntu
+        GITHUB_EMULATION: "true"
+      with:
+        php-version: ${{ inputs.php-version }}
+        extensions: ${{ inputs.php-extensions }}
+        tools: symfony-cli
+
+    - name: Start Default MySQL
+      if: inputs.mysql-version == 'builtin' && !github.event.act
+      shell: bash
+      run: |
+        sudo mv /var/lib/mysql /var/lib/mysql-old
+        sudo mkdir /var/lib/mysql
+        sudo mount -t tmpfs tmpfs /var/lib/mysql -o size=1G
+        sudo -u mysql mysqld --datadir=/var/lib/mysql --default-time-zone=SYSTEM --initialize-insecure
+        sudo systemctl start mysql
+
+    - name: Start External MySQL
+      if: inputs.mysql-version != 'builtin' && inputs.mysql-version != 'skip'
+      shell: bash
+      run: |
+        docker run \
+          --name mysql \
+          -p 3306:3306 \
+          -e MYSQL_ALLOW_EMPTY_PASSWORD=yes \
+          -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=yes \
+          --tmpfs /var/lib/mysql:rw,size=1G \
+          -d \
+          ${{ inputs.mysql-version }}
+
+    - uses: "ramsey/composer-install@v3"
+      with:
+        custom-cache-key: ${{ runner.os }}-setup-onlishop-composer-${{ inputs.php-version }}-${{ hashFiles('composer.json', 'custom/plugins/**/composer.json') }}
+        working-directory: ${{ inputs.path }}
+
+    - uses: actions/setup-node@v4
+      if: inputs.install-storefront || inputs.install-admin
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install npm version
+      if: inputs.npm-version
+      shell: bash
+      run: |
+        npm install -g npm@${{ inputs.npm-version }}
+
+    - name: Retrieve the cached "node_modules" directory (if present)
+      uses: actions/cache@v4
+      if: inputs.install-storefront
+      id: storefront-node-cache
+      with:
+        path: ${{ inputs.path || '.' }}/src/Storefront/Resources/app/storefront/node_modules
+        key: storefront-node-modules-${{ runner.os }}-${{ hashFiles(format('{0}/src/Storefront/Resources/app/storefront/package-lock.json', inputs.path || '.')) }}
+
+    - name: Install dependencies (if the cached directory was not found)
+      if: inputs.install-storefront && steps.storefront-node-cache.outputs.cache-hit != 'true'
+      working-directory: ${{ inputs.path }}
+      env:
+        PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+      shell: bash
+      run: npm --prefix src/Storefront/Resources/app/storefront ci --no-audit --prefer-offline
+
+    - name: Retrieve the cached "node_modules" directory (if present)
+      uses: actions/cache@v4
+      if: inputs.install-admin
+      id: admin-node-cache
+      with:
+        path: ${{ inputs.path || '.' }}/src/Administration/Resources/app/administration/node_modules
+        key: admin-node-modules-${{ runner.os }}-${{ hashFiles(format('{0}/src/Administration/Resources/app/administration/package-lock.json', inputs.path || '.')) }}
+
+    - name: Install dependencies (if the cached directory was not found)
+      if: inputs.install-admin && steps.admin-node-cache.outputs.cache-hit != 'true'
+      env:
+        PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: npm --prefix src/Administration/Resources/app/administration ci --no-audit --prefer-offline
+
+    - name: Prepare Jest environment
+      if: ${{ inputs.install-admin }}
+      shell: bash
+      working-directory: ${{ inputs.path || '.' }}/src/Administration/Resources/app/administration
+      run: npm run unit-setup --if-present
+
+    - name: Entity schema
+      if: ${{ inputs.install-admin }}
+      shell: bash
+      working-directory: ${{ inputs.path || '.' }}
+      run: |
+        composer run framework:schema:dump
+        composer run npm:admin run convert-entity-schema
+
+    - name: Setup Onlishop Database URL
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        echo "DATABASE_URL=mysql://root@127.0.0.1/onlishop" >> "$GITHUB_ENV"
+      if: ${{ env.DATABASE_URL == '' }} # Don't override if already set
+
+    - name: Configure MySQL Client
+      if: inputs.mysql-version != 'builtin'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const os = require('os');
+
+          const uri = process.env.DATABASE_URL;
+          const regex = /^mysql:\/\/(?<user>[^:]+)(:(?<password>[^@]+))?@(?<host>[^:\/]+)(:(?<port>\d+))?(\/(?<database>[^\?]+))?/;
+          const match = uri.match(regex);
+
+          if (!match || !match.groups) {
+              console.error("DATABASE_URL is invalid!");
+              process.exit(1);
+          }
+
+          const { user, password, host, port, database } = match.groups;
+          const myFileContent = [
+            "[client]",
+            `host=${host}`,
+            `user=${user}`,
+            password ? `password=${password}` : null,
+            port ? `port=${port}` : null,
+            database ? `database=${database}` : null,
+          ].filter(Boolean).join("\n");
+
+          fs.writeFileSync(`${os.homedir()}/.my.cnf`, myFileContent);
+
+    - name: Wait for MySQL
+      if: inputs.mysql-version != 'builtin' && inputs.mysql-version != 'skip'
+      shell: bash
+      run: |
+        if docker exec mysql mariadb --version; then
+          while ! docker exec mysql mariadb-admin ping -h localhost --silent; do
+            sleep 1
+          done
+        else
+          while ! docker exec mysql mysqladmin ping -h localhost --silent; do
+            sleep 1
+          done
+        fi
+
+    - name: Setup Onlishop Environment Variables
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        echo "APP_ENV=${{ inputs.env }}" >> "$GITHUB_ENV"
+        echo "APP_SECRET=def00000bb5acb32b54ff8ee130270586eec0e878f7337dc7a837acc31d3ff00f93a56b595448b4b29664847dd51991b3314ff65aeeeb761a133b0ec0e070433bff08e48" >> "$GITHUB_ENV"
+        echo "APP_URL=http://localhost:8000" >> "$GITHUB_ENV"
+
+    - name: Install Onlishop
+      if: inputs.install == 'true'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        composer run init:db -- --shop-locale=${{ inputs.install-locale }} --shop-currency=${{ inputs.install-currency }}
+
+    - name: Build JS Admin
+      if: inputs.install-admin == 'true' && inputs.skip-js-build != 'true'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        composer run build:js:admin
+
+    - name: Build JS Storefront
+      if: inputs.install-storefront == 'true' && inputs.skip-js-build != 'true'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        composer run build:js:storefront
+
+    - name: Copy assets
+      if: inputs.install-storefront == 'true' && inputs.install-admin == 'true'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        bin/console assets:install
+
+    - name: Assign default Storefront theme to all sales channels
+      if: inputs.install == 'true' && inputs.install-storefront == 'true'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        if bin/console theme:change --help | egrep -q '^\s+--sync'; then
+          bin/console theme:change --sync --all Storefront
+        else
+          bin/console theme:change --all Storefront
+        fi
+
+    - name: Start Webserver
+      if: inputs.install == 'true'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      env:
+        SYMFONY_DAEMON: "1"
+        SYMFONY_NO_TLS: "1"
+        SYMFONY_ALLOW_HTTP: "1"
+        SYMFONY_PORT: "8000"
+        SYMFONY_ALLOW_ALL_IP: "1"
+      run: symfony server:start

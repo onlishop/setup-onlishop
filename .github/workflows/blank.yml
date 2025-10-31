@@ -1,0 +1,70 @@
+name: CI
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  mysql-variation:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql:
+          - builtin
+          - mysql:8.1
+          - mariadb:11
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Setup Onlishop
+        uses: ./.
+        with:
+          mysql-version: ${{ matrix.mysql }}
+          install: 'true'
+          path: 'sw-test'
+
+  only-storefront:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Setup Onlishop
+        uses: ./.
+        with:
+          install: 'true'
+          installStorefront: 'true'
+          path: 'sw-test'
+
+  only-admin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Setup Onlishop
+        uses: ./.
+        with:
+          install: 'true'
+          installAdmin: 'true'
+          path: 'sw-test'
+
+  version-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - 'trunk'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Setup Onlishop
+        uses: ./.
+        with:
+          onlishop-version: '${{ matrix.version }}'
+          path: 'sw-test'
+          install: 'true'
+      - name: Show version
+        working-directory: sw-test
+        run: ./bin/console --version
